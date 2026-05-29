@@ -138,4 +138,37 @@ def bit_reversal_perm(N: int, device: str = 'cuda') -> torch.Tensor:
     rev[i] is the integer whose n_bits=log2(N) binary representation is i's
     bits in reversed order.
     """
-    raise NotImplementedError("TODO: implement bit_reversal_perm")
+    # raise NotImplementedError("TODO: implement bit_reversal_perm")
+
+	### reverses bits: rev[i] = reverse(bit(i))
+	# build reverse by OR-ing one bit at a time (no outsourcing)
+	# make sure:
+	#	permutation is its own inverse (rev[rev[i]] == i), be consistent with how F2 uses
+	#		gather load: v[j] = x[rev[j]]
+
+	num_bits = N.bit_length() - 1
+
+	# indices [0, N-1]
+	indices = torch.arange(N, dtype=torch.int32, device=device)
+
+	# rev tensor
+	reversed_indices = torch.zeros(N, dtype=torch.int32, device=device)
+
+	for source_bit in range(num_bits):
+		target_bit = num_bits - 1 - source_bit
+
+		# extract bit (shift right until in slot 1, isolate)
+		bit_value = (indices >> source_bit) & 1
+
+		# place bit at target bit
+		shifted_bit = bit_value << target_bit
+
+		# bitwise OR to accumulate bits together
+		reversed_indices = reversed_indices | shifted_bit
+
+	return reversed_indices
+
+
+
+
+
