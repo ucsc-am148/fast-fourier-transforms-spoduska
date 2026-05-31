@@ -47,10 +47,16 @@ def _cdot(a_re, a_im, b_re, b_im):
     Used by f1_kernel, f4_kernel_L2, and dft_kernel. Don't reimplement the
     four-tl.dot expansion at each call site -- implement once here, call
     everywhere.
-
-    TODO: implement.
     """
-    pass
+
+    # Complex matmul (a_re + i*a_im) @ (b_re + i*b_im) = four real tl.dot calls.
+    # real part: a_re*b_re - a_im*b_im ; imag part: a_re*b_im + a_im*b_re
+    # out_dtype=tl.float32 keeps accumulation in fp32 (tcFFT contract)
+    y_re = (tl.dot(a_re, b_re, out_dtype=tl.float32)
+            - tl.dot(a_im, b_im, out_dtype=tl.float32))
+    y_im = (tl.dot(a_re, b_im, out_dtype=tl.float32)
+            + tl.dot(a_im, b_re, out_dtype=tl.float32))
+    return y_re, y_im
 
 
 # =============================================================================
@@ -101,20 +107,60 @@ def f1_kernel(
     `out_dtype=tl.float32` (handled by `_cdot`), accumulator is fp32, store
     is fp32. Allocations in `f1_alloc` already match this -- x_re/x_im are
     fp16, y_re/y_im are fp32.
-
-    TODO: implement.
     """
-    pass
+
+    # Each program computes one (BLOCK_M, BLOCK_N) tile of the output, looping
+    # over K in BLOCK_K chunks.
+
+    # One program computes a (BLOCK_M, BLOCK_M) output tile of Y[b, n].
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    # fp32 accumulators (tcFFT contract: dot in fp32, store fp32).
+    acc_re = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc_im = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k0 in range(0, N, BLOCK_K):
+        offs_k = k0 + tl.arange(0, BLOCK_K)
+        # X tile (BLOCK_M, BLOCK_K): row-major X[m, k] lives at m*N + k.
+        x_off = offs_m[:, None] * N + offs_k[None, :]
+        x_mask = (offs_m[:, None] < B) & (offs_k[None, :] < N)
+        x_re = tl.load(x_re_ptr + x_off, mask=x_mask, other=0.0)
+        x_im = tl.load(x_im_ptr + x_off, mask=x_mask, other=0.0)
+        # Want W^T[k, n] = W[n, k]; W is row-major so W[n, k] is at n*N + k
+        w_off = offs_n[None, :] * N + offs_k[:, None]
+        w_mask = (offs_k[:, None] < N) & (offs_n[None, :] < N)
+        w_re = tl.load(W_re_ptr + w_off, mask=w_mask, other=0.0)
+        w_im = tl.load(W_im_ptr + w_off, mask=w_mask, other=0.0)
+
+        p_re, p_im = _cdot(x_re, x_im, w_re, w_im)
+        acc_re += p_re
+        acc_im += p_im
+
+    # Store the fp32 result tile.
+    y_off = offs_m[:, None] * N + offs_n[None, :]
+    y_mask = (offs_m[:, None] < B) & (offs_n[None, :] < N)
+    tl.store(y_re_ptr + y_off, acc_re, mask=y_mask)
+    tl.store(y_im_ptr + y_off, acc_im, mask=y_mask)
+
 
 
 def f1_launch(x_re, x_im, W_re, W_im, y_re, y_im):
     """Grid: (cdiv(B, BLOCK_M), cdiv(N, BLOCK_N)). One program tiles a
     (BLOCK_M, BLOCK_N) output square. tl.dot needs all three dims >=16, so B
     should be >= 16.
-
-    TODO: implement.
     """
-    raise NotImplementedError("TODO: implement f1_launch")
+    
+    # Grid: one program per (BLOCK_M, BLOCK_N) output tile
+    B, N = x_re.shape
+    BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 64
+    grid = (triton.cdiv(B, BLOCK_M), triton.cdiv(N, BLOCK_N))
+    f1_kernel[grid](
+        x_re, x_im, W_re, W_im, y_re, y_im, B,
+        N=N, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, BLOCK_N=BLOCK_N,
+    )
 
 
 # =============================================================================
