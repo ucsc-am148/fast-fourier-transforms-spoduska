@@ -278,13 +278,17 @@ def f2_launch(x_re, x_im, y_re, y_im, tw_re, tw_im, perm):
     """
     B, N = x_re.shape
     LOG2_N = int(math.log2(N))
+    # Signal holds the whole length-N vector in registers.
+    # With the default 4 warps, large N (>=16384) overflows the register file
+    # and spills. Scaling warps with N keeps ~16 elems/thread, no spill.
+    num_warps = max(4, min(32, N // 512))
     grid = (B,)
     f2_kernel[grid](
         x_re, x_im, y_re, y_im, tw_re, tw_im, perm,
         tw_re, tw_im,          # bt_* sentinel (never read in vanilla)
         1, 0,                  # OUTER_DIM, N_TOTAL unused in vanilla
-        N=N, LOG2_N=LOG2_N,
-        BAILEY_EPILOGUE=False, STRIDED_STORE=False,
+        N=N, LOG2_N=LOG2_N,                                                                                       BAILEY_EPILOGUE=False, STRIDED_STORE=False,
+        num_warps=num_warps,
     )
 
 
